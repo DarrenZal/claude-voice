@@ -44,44 +44,58 @@ def current_mode() -> str:
         return "ambient"
 
 
-def get_target_pane() -> str | None:
-    # Prefer the pane tracked by the SessionStart hook
+def inject_osascript(text: str) -> bool:
+    """Type text into the frontmost app using System Events (works without tmux)."""
+    # Escape backslashes and double-quotes for AppleScript string literal
+    safe = text.replace("\\", "\\\\").replace('"', '\\"')
+    enter = "\n    keystroke return" if AUTOSUBMIT else ""
+    script = f'tell application "System Events"\n    keystroke "{safe}"{enter}\nend tell'
+    try:
+        subprocess.run(["osascript", "-e", script], timeout=5, check=True)
+        return True
+    except Exception as e:
+        log(f"osascript inject failed: {e}")
+        return False
+
+
+def inject_tmux(text: str) -> bool:
+    """Inject via tmux send-keys (used when Claude Code is running inside tmux)."""
+    # Check tracked pane first, then active pane
+    pane = None
     if ACTIVE_PANE.exists():
         try:
-            pane = ACTIVE_PANE.read_text().strip()
-            if pane:
-                return pane
+            pane = ACTIVE_PANE.read_text().strip() or None
         except Exception:
             pass
-    # Fall back to whatever tmux pane is currently focused
-    try:
-        r = subprocess.run(
-            ["tmux", "display-message", "-p", "#{pane_id}"],
-            capture_output=True, text=True, timeout=2,
-        )
-        pane = r.stdout.strip()
-        return pane or None
-    except Exception:
-        return None
-
-
-def inject(text: str) -> bool:
-    pane = get_target_pane()
     if not pane:
-        log(f"no active tmux pane — dropping: {text!r}")
+        try:
+            r = subprocess.run(
+                ["tmux", "display-message", "-p", "#{pane_id}"],
+                capture_output=True, text=True, timeout=2,
+            )
+            pane = r.stdout.strip() or None
+        except Exception:
+            pass
+    if not pane:
         return False
     try:
         keys = [text, "Enter"] if AUTOSUBMIT else [text]
-        subprocess.run(
-            ["tmux", "send-keys", "-t", pane] + keys,
-            timeout=3, check=True,
-        )
-        suffix = " + Enter" if AUTOSUBMIT else ""
-        log(f"→ pane {pane}{suffix}: {text!r}")
+        subprocess.run(["tmux", "send-keys", "-t", pane] + keys, timeout=3, check=True)
         return True
-    except Exception as e:
-        log(f"inject failed: {e}")
+    except Exception:
         return False
+
+
+def inject(text: str) -> bool:
+    # Try tmux first (lower latency), fall back to osascript
+    if inject_tmux(text):
+        log(f"→ tmux{' + Enter' if AUTOSUBMIT else ''}: {text!r}")
+        return True
+    if inject_osascript(text):
+        log(f"→ osascript{' + Enter' if AUTOSUBMIT else ''}: {text!r}")
+        return True
+    log(f"inject failed — dropped: {text!r}")
+    return False
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────

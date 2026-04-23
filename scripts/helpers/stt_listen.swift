@@ -29,6 +29,9 @@ class ContinuousListener {
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
     private var restarting = false
+    private var silenceTimer: DispatchWorkItem?
+    private let silenceDelay: Double = 1.5  // seconds of silence → emit transcript
+    private var lastPartial = ""
 
     init() {
         guard let r = SFSpeechRecognizer(locale: Locale(identifier: "en-US")),
@@ -45,11 +48,11 @@ class ContinuousListener {
         request = SFSpeechAudioBufferRecognitionRequest()
         guard let req = request else { return }
 
-        // On-device only — no audio sent to Apple servers
+        // Prefer on-device (macOS 13+) but fall back to server if model not downloaded
         if #available(macOS 13, *) {
-            req.requiresOnDeviceRecognition = true
+            req.requiresOnDeviceRecognition = recognizer.supportsOnDeviceRecognition
         }
-        req.shouldReportPartialResults = false
+        req.shouldReportPartialResults = true   // debug: log partials too
         req.taskHint = .dictation
 
         let inputNode = audioEngine.inputNode
@@ -62,22 +65,35 @@ class ContinuousListener {
         task = recognizer.recognitionTask(with: req) { [weak self] result, error in
             guard let self = self else { return }
 
-            if let result = result, result.isFinal {
+            if let result = result {
                 let text = result.bestTranscription.formattedString
                     .trimmingCharacters(in: .whitespacesAndNewlines)
-                if !text.isEmpty {
-                    print(text)  // one transcript per line → Python reads this
+                guard !text.isEmpty else { return }
+
+                self.lastPartial = text
+                fputs("partial: \(text)\n", stderr)
+                fflush(stderr)
+
+                // Reset silence timer — emit transcript after 1.5s of no new partials
+                self.silenceTimer?.cancel()
+                let item = DispatchWorkItem { [weak self] in
+                    guard let self = self, !self.lastPartial.isEmpty else { return }
+                    let transcript = self.lastPartial
+                    self.lastPartial = ""
+                    print(transcript)   // → Python reads this on stdout
                     fflush(stdout)
+                    self.scheduleRestart()
                 }
-                self.scheduleRestart()
+                self.silenceTimer = item
+                DispatchQueue.main.asyncAfter(deadline: .now() + self.silenceDelay, execute: item)
                 return
             }
 
             if let error = error {
                 let code = (error as NSError).code
-                // 301 = no speech detected (normal timeout), 203 = cancelled (our restart), 1110 = no match
-                if code != 301 && code != 203 && code != 1110 {
-                    fputs("warn: recognition error \(code): \(error.localizedDescription)\n", stderr)
+                // 203 = cancelled by our own restart — ignore
+                if code != 203 {
+                    fputs("recognition code=\(code): \(error.localizedDescription)\n", stderr)
                 }
                 if !self.restarting {
                     self.scheduleRestart()
@@ -97,9 +113,11 @@ class ContinuousListener {
     private func scheduleRestart() {
         guard !restarting else { return }
         restarting = true
+        silenceTimer?.cancel()
+        silenceTimer = nil
+        lastPartial = ""
         audioEngine.stop()
         audioEngine.inputNode.removeTap(onBus: 0)
-        request?.endAudio()
         task?.cancel()
         task = nil
         request = nil
@@ -113,12 +131,16 @@ class ContinuousListener {
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
+// Global retain — prevents ARC from deallocating listener while run loop is active
+var gListener: ContinuousListener?
+
 fputs("stt_listen: requesting permissions\n", stderr)
 
 requestPermissions { granted in
     guard granted else { exit(1) }
     DispatchQueue.main.async {
         let listener = ContinuousListener()
+        gListener = listener   // keep alive for duration of process
         listener.start()
         fputs("stt_listen: ready — speak to transcribe\n", stderr)
     }
