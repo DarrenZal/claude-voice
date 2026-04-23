@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchAgent for the claude-voice mic watcher (macOS).
+  Polls AVCaptureDevice.isInUseByAnotherApplication every second.
+  Auto-silences the voice arbiter when a call is detected.
+
+  install_macos.sh substitutes PLUGIN_DIR_PLACEHOLDER and VENV_DIR_PLACEHOLDER.
+
+  Manual control:
+    launchctl start  com.claude-voice.mic-watcher
+    launchctl stop   com.claude-voice.mic-watcher
+    launchctl unload ~/Library/LaunchAgents/com.claude-voice.mic-watcher.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.claude-voice.mic-watcher</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>VENV_DIR_PLACEHOLDER/bin/python3</string>
+        <string>PLUGIN_DIR_PLACEHOLDER/scripts/mic_watcher.py</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+
+    <key>WorkingDirectory</key>
+    <string>PLUGIN_DIR_PLACEHOLDER</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/claude-voice-mic-watcher.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/tmp/claude-voice-mic-watcher.log</string>
+</dict>
+</plist>

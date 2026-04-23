@@ -15,6 +15,7 @@ VENV_DIR="$HOME/.local/share/kokoro-onnx-env"
 MODELS_DIR="$HOME/.local/share/kokoro-onnx-models"
 LAUNCHD_PLIST="$HOME/Library/LaunchAgents/com.claude-voice.tts.plist"
 ARBITER_PLIST="$HOME/Library/LaunchAgents/com.claude-voice.arbiter.plist"
+MIC_WATCHER_PLIST="$HOME/Library/LaunchAgents/com.claude-voice.mic-watcher.plist"
 VOICE_DATA_DIR="$HOME/.claude/local/voice"
 
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; NC='\033[0m'
@@ -166,6 +167,42 @@ if [[ -f "$ARBITER_SRC" ]]; then
 else
     warn "launchd/voice-arbiter.plist not found — skipping arbiter auto-start"
     warn "Start manually: $VENV_DIR/bin/python3 $PLUGIN_DIR/scripts/voice_arbiter.py"
+fi
+
+# ── 6c. Compile mic_check Swift binary ───────────────────────────────────────
+step "Compiling mic_check (AVFoundation mic-in-use detector)"
+
+MIC_CHECK_SRC="$PLUGIN_DIR/scripts/helpers/mic_check.swift"
+MIC_CHECK_BIN="$PLUGIN_DIR/scripts/helpers/mic_check"
+if [[ -f "$MIC_CHECK_SRC" ]]; then
+    if swiftc "$MIC_CHECK_SRC" -o "$MIC_CHECK_BIN" 2>&1; then
+        ok "mic_check compiled → $MIC_CHECK_BIN"
+        # Smoke test
+        "$MIC_CHECK_BIN"; CODE=$?
+        [[ $CODE -eq 0 ]] && ok "mic_check: microphone free" || ok "mic_check: microphone in use (exit $CODE)"
+    else
+        warn "swiftc failed — mic auto-silence will not work"
+        warn "Ensure Xcode Command Line Tools are installed: xcode-select --install"
+    fi
+else
+    warn "scripts/helpers/mic_check.swift not found — skipping compile"
+fi
+
+# ── 6d. Install LaunchAgent (mic watcher) ────────────────────────────────────
+step "Installing mic watcher LaunchAgent"
+
+MIC_WATCHER_SRC="$PLUGIN_DIR/launchd/voice-mic-watcher.plist"
+if [[ -f "$MIC_WATCHER_SRC" ]]; then
+    sed \
+        -e "s|PLUGIN_DIR_PLACEHOLDER|$PLUGIN_DIR|g" \
+        -e "s|VENV_DIR_PLACEHOLDER|$VENV_DIR|g" \
+        "$MIC_WATCHER_SRC" > "$MIC_WATCHER_PLIST"
+
+    launchctl unload "$MIC_WATCHER_PLIST" 2>/dev/null || true
+    launchctl load -w "$MIC_WATCHER_PLIST"
+    ok "Mic watcher LaunchAgent installed + loaded (auto-silences during calls)"
+else
+    warn "launchd/voice-mic-watcher.plist not found — skipping mic watcher"
 fi
 
 # ── 7. Wire Claude Code hooks ──────────────────────────────────────────────────
