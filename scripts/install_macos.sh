@@ -16,6 +16,7 @@ MODELS_DIR="$HOME/.local/share/kokoro-onnx-models"
 LAUNCHD_PLIST="$HOME/Library/LaunchAgents/com.claude-voice.tts.plist"
 ARBITER_PLIST="$HOME/Library/LaunchAgents/com.claude-voice.arbiter.plist"
 MIC_WATCHER_PLIST="$HOME/Library/LaunchAgents/com.claude-voice.mic-watcher.plist"
+STT_PLIST="$HOME/Library/LaunchAgents/com.claude-voice.stt.plist"
 VOICE_DATA_DIR="$HOME/.claude/local/voice"
 
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; NC='\033[0m'
@@ -203,6 +204,41 @@ if [[ -f "$MIC_WATCHER_SRC" ]]; then
     ok "Mic watcher LaunchAgent installed + loaded (auto-silences during calls)"
 else
     warn "launchd/voice-mic-watcher.plist not found — skipping mic watcher"
+fi
+
+# ── 6e. Compile stt_listen Swift binary ──────────────────────────────────────
+step "Compiling stt_listen (SFSpeechRecognizer STT)"
+
+STT_LISTEN_SRC="$PLUGIN_DIR/scripts/helpers/stt_listen.swift"
+STT_LISTEN_BIN="$PLUGIN_DIR/scripts/helpers/stt_listen"
+if [[ -f "$STT_LISTEN_SRC" ]]; then
+    if swiftc "$STT_LISTEN_SRC" -o "$STT_LISTEN_BIN" 2>&1; then
+        ok "stt_listen compiled → $STT_LISTEN_BIN"
+    else
+        warn "swiftc failed — STT will not work"
+        warn "Ensure Xcode Command Line Tools are installed: xcode-select --install"
+    fi
+else
+    warn "scripts/helpers/stt_listen.swift not found — skipping STT compile"
+fi
+
+# ── 6f. Install LaunchAgent (STT daemon) ──────────────────────────────────────
+step "Installing STT daemon LaunchAgent"
+
+STT_SRC="$PLUGIN_DIR/launchd/voice-stt-macos.plist"
+if [[ -f "$STT_SRC" ]]; then
+    sed \
+        -e "s|PLUGIN_DIR_PLACEHOLDER|$PLUGIN_DIR|g" \
+        -e "s|VENV_DIR_PLACEHOLDER|$VENV_DIR|g" \
+        "$STT_SRC" > "$STT_PLIST"
+
+    launchctl unload "$STT_PLIST" 2>/dev/null || true
+    launchctl load -w "$STT_PLIST"
+    ok "STT LaunchAgent installed + loaded"
+    echo "  Note: macOS will prompt for Speech Recognition permission on first run."
+    echo "  Grant access in System Settings → Privacy & Security → Speech Recognition"
+else
+    warn "launchd/voice-stt-macos.plist not found — skipping STT daemon"
 fi
 
 # ── 7. Wire Claude Code hooks ──────────────────────────────────────────────────

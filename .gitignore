@@ -13,3 +13,4 @@ venv/
 *.mp3
 .DS_Store
 scripts/helpers/mic_check
+scripts/helpers/stt_listen

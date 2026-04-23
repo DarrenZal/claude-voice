@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchAgent for the claude-voice STT daemon (macOS).
+  Uses SFSpeechRecognizer — fully on-device, no audio sent to servers.
+
+  install_macos.sh substitutes PLUGIN_DIR_PLACEHOLDER and VENV_DIR_PLACEHOLDER.
+
+  Manual control:
+    launchctl start  com.claude-voice.stt
+    launchctl stop   com.claude-voice.stt
+    launchctl unload ~/Library/LaunchAgents/com.claude-voice.stt.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.claude-voice.stt</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>VENV_DIR_PLACEHOLDER/bin/python3</string>
+        <string>PLUGIN_DIR_PLACEHOLDER/scripts/stt_macos.py</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Restart on crash, but not on clean exit (launchctl stop) -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+
+    <key>WorkingDirectory</key>
+    <string>PLUGIN_DIR_PLACEHOLDER</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+        <!-- Set to 0 to type transcript without auto-submitting -->
+        <key>STT_AUTOSUBMIT</key>
+        <string>1</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/claude-voice-stt.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/tmp/claude-voice-stt.log</string>
+</dict>
+</plist>
