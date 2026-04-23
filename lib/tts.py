@@ -31,7 +31,11 @@ from constants import (
     DAEMON_SOCKET,
     DAEMON_TIMEOUT_SECONDS,
     DEFAULT_VOICE,
+    IS_MACOS,
     KOKORO_ENV,
+    KOKORO_ONNX_ENV,
+    KOKORO_ONNX_MODEL,
+    KOKORO_ONNX_MODELS_DIR,
     SYNTHESIS_TIMEOUT_SECONDS,
     TARGET_SAMPLE_RATE,
     TTS_MAX_CHARS,
@@ -108,17 +112,89 @@ def synthesize(
     if cached is not None:
         return cached
 
-    # Verify Kokoro is available
-    if not KOKORO_ENV.exists():
-        return None
-
     # Determine output path
     if output_path is None:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         output_path = _cached_path(text, voice)
 
-    # Run synthesis in subprocess via env vars (no string interpolation into code)
-    # This avoids importing PyTorch/Kokoro into the hook process
+    if IS_MACOS:
+        return _synthesize_macos(text, voice, output_path, timeout)
+    else:
+        return _synthesize_kokoro_gpu(text, voice, output_path, timeout)
+
+
+def _synthesize_macos(
+    text: str, voice: str, output_path: Path, timeout: float
+) -> Optional[Path]:
+    """macOS path: kokoro-onnx via CPU/Apple Silicon ONNX runtime."""
+    if not KOKORO_ONNX_ENV.exists():
+        return None
+
+    model_file = KOKORO_ONNX_MODEL
+    voices_file = KOKORO_ONNX_MODELS_DIR / "voices-v1.0.bin"
+    if not model_file.exists() or not voices_file.exists():
+        return None
+
+    synth_script = '''
+import warnings
+warnings.filterwarnings("ignore")
+import os, sys
+import numpy as np
+import soundfile as sf
+import scipy.signal
+from kokoro_onnx import Kokoro
+
+model_path = os.environ["TTS_MODEL"]
+voices_path = os.environ["TTS_VOICES"]
+text = os.environ["TTS_TEXT"]
+voice = os.environ["TTS_VOICE"]
+output = os.environ["TTS_OUTPUT"]
+target_sr = int(os.environ.get("TTS_SAMPLE_RATE", "48000"))
+
+kokoro = Kokoro(model_path, voices_path)
+samples, src_sr = kokoro.create(text, voice=voice, speed=1.0, lang="en-us")
+if samples is None or len(samples) == 0:
+    sys.exit(1)
+
+# Upsample from native rate (usually 24000) to target (48000) for consistency
+if src_sr != target_sr:
+    samples = scipy.signal.resample_poly(samples, target_sr, src_sr)
+
+stereo = np.column_stack([samples, samples])
+sf.write(output, stereo.astype(np.float32), target_sr, subtype="PCM_16")
+'''
+
+    try:
+        result = subprocess.run(
+            [str(KOKORO_ONNX_ENV), "-c", synth_script],
+            capture_output=True,
+            timeout=timeout,
+            env={
+                **os.environ,
+                "PYTHONWARNINGS": "ignore",
+                "TTS_MODEL": str(KOKORO_ONNX_MODELS_DIR / "kokoro-v1.0.onnx"),
+                "TTS_VOICES": str(KOKORO_ONNX_MODELS_DIR / "voices-v1.0.bin"),
+                "TTS_TEXT": text,
+                "TTS_VOICE": voice,
+                "TTS_OUTPUT": str(output_path),
+                "TTS_SAMPLE_RATE": str(TARGET_SAMPLE_RATE),
+            },
+        )
+        if result.returncode == 0 and output_path.exists():
+            return output_path
+    except (subprocess.TimeoutExpired, OSError, FileNotFoundError):
+        pass
+
+    return None
+
+
+def _synthesize_kokoro_gpu(
+    text: str, voice: str, output_path: Path, timeout: float
+) -> Optional[Path]:
+    """Linux/CUDA path: Kokoro-82M GPU via PyTorch."""
+    if not KOKORO_ENV.exists():
+        return None
+
     synth_script = '''
 import warnings
 warnings.filterwarnings("ignore")

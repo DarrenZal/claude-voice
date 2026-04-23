@@ -35,13 +35,20 @@ import argparse
 import hashlib
 import json
 import os
+import queue
 import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 import warnings
 from pathlib import Path
+
+# Add lib/ to path so we can use audio.play_sound() for platform-aware playback
+_LIB_DIR = Path(__file__).resolve().parent.parent / "lib"
+if str(_LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(_LIB_DIR))
 
 warnings.filterwarnings("ignore")
 
@@ -94,6 +101,31 @@ def _log(msg: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Backend adapter
+# ---------------------------------------------------------------------------
+
+class _KokoroOnnxAdapter:
+    """Wraps kokoro-onnx so _synthesize() can call it like a KPipeline.
+
+    KPipeline is called as:  for (_, _, audio) in pipe(text, voice=v, speed=s)
+    kokoro-onnx uses:        samples, sr = kokoro.create(text, voice=v, speed=s)
+
+    This adapter makes both look identical to _synthesize().
+    It also exposes .sample_rate so _synthesize() can skip the hardcoded
+    24→48kHz upsample when the model reports a different native rate.
+    """
+
+    def __init__(self, kokoro):
+        self._kokoro = kokoro
+        self.sample_rate: int = 24000   # kokoro-onnx native rate
+
+    def __call__(self, text: str, voice: str = "af_heart", speed: float = 1.0):
+        samples, sr = self._kokoro.create(text, voice=voice, speed=speed, lang="en-us")
+        self.sample_rate = int(sr)
+        yield (None, None, samples)
+
+
+# ---------------------------------------------------------------------------
 # TTS synthesis (runs inside daemon, Kokoro already loaded)
 # ---------------------------------------------------------------------------
 
@@ -128,8 +160,12 @@ def _synthesize(pipe, text: str, voice: str) -> Path:
 
     audio = np.concatenate(chunks) if len(chunks) > 1 else chunks[0]
 
-    # Upsample 24kHz → 48kHz for PipeWire
-    audio_48k = scipy.signal.resample_poly(audio, 2, 1)
+    # Upsample native rate → 48kHz (PipeWire / afplay both handle 48kHz fine)
+    src_rate = getattr(pipe, "sample_rate", 24000)
+    if src_rate != TARGET_SAMPLE_RATE:
+        audio_48k = scipy.signal.resample_poly(audio, TARGET_SAMPLE_RATE, src_rate)
+    else:
+        audio_48k = audio
     stereo = np.column_stack([audio_48k, audio_48k])
 
     # ── Loudness normalization ──────────────────────────────────────
@@ -275,16 +311,13 @@ def _enqueue_in_voice_queue(wav_path: str, volume: float, pane_id: str = "_globa
     # SYNC: lib/constants.py:QUEUE_SOCKET
     queue_sock = Path("~/.claude/local/voice/queue.sock").expanduser()
     if not queue_sock.exists():
-        # No queue daemon — play directly
+        # No queue daemon — play directly via platform-aware audio backend
         try:
-            subprocess.Popen(
-                ["pw-play", f"--volume={volume:.3f}", wav_path],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
+            from audio import play_sound
+            play_sound(Path(wav_path), volume=volume)
             _log(f"direct playback (no queue): {Path(wav_path).name}")
-        except Exception:
-            pass
+        except Exception as e:
+            _log(f"direct playback failed: {e}")
         return
 
     try:
@@ -313,11 +346,8 @@ def _enqueue_in_voice_queue(wav_path: str, volume: float, pane_id: str = "_globa
     except Exception as e:
         _log(f"queue enqueue failed: {e}, playing directly")
         try:
-            subprocess.Popen(
-                ["pw-play", f"--volume={volume:.3f}", wav_path],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
+            from audio import play_sound
+            play_sound(Path(wav_path), volume=volume)
         except Exception:
             pass
 
@@ -453,17 +483,70 @@ def main() -> None:
         _stop()
         return
 
-    # Start daemon — load Kokoro once, then serve
-    _log("loading Kokoro-82M...")
-    t0 = time.monotonic()
+    pipe = _load_backend()
+    _run_server(pipe)
 
+
+def _load_backend():
+    """Load the appropriate TTS backend for this platform.
+
+    Returns a callable with the same interface used by _synthesize():
+      - Linux/CUDA: KPipeline (kokoro-82M via PyTorch)
+      - macOS/CPU:  KokoroOnnxAdapter wrapping kokoro-onnx
+    """
+    import sys as _sys
+    if _sys.platform == "darwin":
+        return _load_kokoro_onnx()
+    return _load_kokoro_gpu()
+
+
+def _load_kokoro_gpu():
+    """Load Kokoro-82M GPU backend (Linux/CUDA)."""
+    _log("loading Kokoro-82M (GPU)...")
+    t0 = time.monotonic()
     from kokoro import KPipeline  # type: ignore[import]
     pipe = KPipeline(lang_code="a", repo_id="hexgrad/Kokoro-82M")
+    _log(f"Kokoro-82M loaded in {int((time.monotonic() - t0) * 1000)}ms")
+    return pipe
 
-    load_ms = int((time.monotonic() - t0) * 1000)
-    _log(f"Kokoro loaded in {load_ms}ms")
 
-    _run_server(pipe)
+def _load_kokoro_onnx():
+    """Load kokoro-onnx backend (macOS/CPU via ONNX runtime)."""
+    from pathlib import Path as _Path
+    # Use the same model discovery logic as lib/constants.py
+    models_dir = _Path("~/.local/share/kokoro-onnx-models").expanduser()
+    candidates = [
+        models_dir / "kokoro-v1.0.fp16.onnx",
+        models_dir / "kokoro-v1.0.onnx",
+        models_dir / "kokoro-v1.0.int8.onnx",
+    ]
+    model_file = next((c for c in candidates if c.exists()), candidates[0])
+    voices_file = models_dir / "voices-v1.0.bin"
+
+    if not model_file.exists() or not voices_file.exists():
+        raise FileNotFoundError(
+            f"kokoro-onnx model files not found in {models_dir}. "
+            "Run scripts/install_macos.sh to download them."
+        )
+
+    _log("loading kokoro-onnx (CPU/Apple Silicon)...")
+    t0 = time.monotonic()
+    from kokoro_onnx import Kokoro  # type: ignore[import]
+    kokoro = Kokoro(str(model_file), str(voices_file))
+    _log(f"kokoro-onnx loaded in {int((time.monotonic() - t0) * 1000)}ms")
+    adapter = _KokoroOnnxAdapter(kokoro)
+
+    # Warmup: trigger ONNX JIT compilation so first user request is fast.
+    # Without this the first inference can take 60–120s while ONNX optimizes the graph.
+    _log("warming up ONNX execution engine...")
+    t1 = time.monotonic()
+    try:
+        kokoro.create("Ready.", voice="af_heart", speed=1.0, lang="en-us")
+        _log(f"warmup complete in {int((time.monotonic() - t1) * 1000)}ms")
+    except Exception as e:
+        _log(f"warmup failed (non-fatal): {e}")
+
+    return adapter
 
 
 if __name__ == "__main__":

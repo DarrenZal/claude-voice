@@ -49,6 +49,25 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+# Add lib/ so we can use audio.py's platform-aware backend detection
+_LIB_DIR = Path(__file__).resolve().parent.parent / "lib"
+if str(_LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(_LIB_DIR))
+
+
+def _play_cmd(wav_path: str, volume: float) -> list[str]:
+    """Return the platform-aware command list for blocking audio playback.
+
+    Used by asyncio.create_subprocess_exec — must return a flat list.
+    Mirrors audio.py's FALLBACK_CHAIN + _build_args but as a blocking call
+    so the arbiter can await process completion for serialized TTS.
+    """
+    from audio import detect_backend, _build_args
+    backend_path, backend_name = detect_backend()
+    if not backend_path:
+        return []
+    return _build_args(backend_name, backend_path, Path(wav_path), volume)
+
 # ---------------------------------------------------------------------------
 # Add lib/ to path for volume and state imports
 # ---------------------------------------------------------------------------
@@ -614,14 +633,16 @@ class VoiceArbiter:
             _log(f"playing: {msg.id} pane={msg.pane_id} [{msg.agent_id}] vol={play_vol:.2f} (fallback: {e})")
 
         try:
+            cmd = _play_cmd(msg.wav_path, play_vol)
+            if not cmd:
+                _log(f"no audio backend found, skipping: {msg.id}")
+                self._complete_current()
+                return
             self.playing_proc = await asyncio.create_subprocess_exec(
-                "pw-play", f"--volume={play_vol:.3f}",
-                "--target=claude-voice-sink",
-                "-P", '{"application.name":"claude-voice"}',
-                msg.wav_path,
+                *cmd,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
-            )  # Same sink/flags as voice_queue._play_wav for consistent gain staging
+            )
             self._write_speaking_now(msg.pane_id)
             # Update tmux indicators — show speaking icon on this pane
             self.update_tmux_indicators()

@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchAgent for the claude-voice TTS daemon (macOS equivalent of voice-tts.service).
+
+  install_macos.sh substitutes PLUGIN_DIR_PLACEHOLDER and VENV_DIR_PLACEHOLDER
+  before loading this plist with launchctl.
+
+  Manual install (after substitution):
+    launchctl load -w ~/Library/LaunchAgents/com.claude-voice.tts.plist
+
+  Manual control:
+    launchctl start  com.claude-voice.tts
+    launchctl stop   com.claude-voice.tts
+    launchctl unload ~/Library/LaunchAgents/com.claude-voice.tts.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.claude-voice.tts</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>VENV_DIR_PLACEHOLDER/bin/python3</string>
+        <string>PLUGIN_DIR_PLACEHOLDER/scripts/tts_daemon.py</string>
+    </array>
+
+    <!-- Start automatically when the user logs in -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Restart if it crashes (mimics systemd Restart=on-failure) -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+
+    <key>WorkingDirectory</key>
+    <string>PLUGIN_DIR_PLACEHOLDER</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+        <!-- Tells the daemon it's under a service manager (disables idle timeout) -->
+        <key>INVOCATION_ID</key>
+        <string>launchd</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/claude-voice-tts.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/tmp/claude-voice-tts.log</string>
+</dict>
+</plist>

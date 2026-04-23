@@ -6,7 +6,10 @@ these values imports from here. Never duplicate these elsewhere.
 Scripts that cannot import (PEP 723 standalone) must declare their own copy
 with a `# SYNC: lib/constants.py:<NAME>` comment pointing here.
 """
+import sys
 from pathlib import Path
+
+IS_MACOS = sys.platform == "darwin"
 
 # ── Audio ────────────────────────────────────────────────────────────
 TARGET_SAMPLE_RATE = 48000
@@ -63,7 +66,34 @@ HEARTBEAT_PATH = Path("~/.claude/local/health/voice-heartbeat").expanduser()
 """Health monitoring heartbeat file."""
 
 KOKORO_ENV = Path("~/.local/share/kokoro-env/bin/python3").expanduser()
-"""Kokoro venv Python binary."""
+"""Kokoro GPU venv Python binary (Linux/CUDA)."""
+
+KOKORO_ONNX_ENV = Path("~/.local/share/kokoro-onnx-env/bin/python3").expanduser()
+"""kokoro-onnx venv Python binary (macOS / CPU). Install via scripts/install_macos.sh."""
+
+KOKORO_ONNX_MODELS_DIR = Path("~/.local/share/kokoro-onnx-models").expanduser()
+"""Directory for kokoro-onnx ONNX model files."""
+
+
+def _find_kokoro_onnx_model() -> Path:
+    """Return the best available kokoro-onnx model file.
+
+    Preference: fp16 (smaller + Apple Silicon optimized) > full precision.
+    Returns the path regardless of existence — callers must check .exists().
+    """
+    candidates = [
+        KOKORO_ONNX_MODELS_DIR / "kokoro-v1.0.fp16.onnx",
+        KOKORO_ONNX_MODELS_DIR / "kokoro-v1.0.onnx",
+        KOKORO_ONNX_MODELS_DIR / "kokoro-v1.0.int8.onnx",
+    ]
+    for c in candidates:
+        if c.exists():
+            return c
+    return candidates[0]  # Return fp16 path even if not present (caller handles missing)
+
+
+KOKORO_ONNX_MODEL = _find_kokoro_onnx_model()
+"""Best available kokoro-onnx model file (resolved at import time)."""
 
 THEMES_DIR = Path(__file__).resolve().parent.parent / "assets" / "themes"
 """Root directory for all theme assets (sounds, theme.json files)."""

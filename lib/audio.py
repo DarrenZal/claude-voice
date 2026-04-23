@@ -19,6 +19,7 @@ FALLBACK_CHAIN = [
     ("paplay", "paplay"),
     ("aplay", "aplay"),
     ("mpv", "mpv"),
+    ("afplay", "afplay"),   # macOS fallback
 ]
 
 
@@ -70,6 +71,9 @@ def _build_args(name: str, path: str, sound: Path, volume: float, sink: str = ""
                 f"--volume={int(volume * 100)}",
                 str(sound),
             ]
+        case "afplay":
+            # macOS built-in player; -v is a linear gain (0.0–1.0+)
+            return [path, "-v", f"{volume:.3f}", str(sound)]
         case _:
             return [path, str(sound)]
 
