@@ -13,6 +13,7 @@ Behaviour:
 """
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -37,11 +38,23 @@ def log(msg: str) -> None:
     print(f"stt_macos: {msg}", flush=True)
 
 
+SPEAKING_NOW = VOICE_DIR / "speaking-now.json"
+
+
 def current_mode() -> str:
     try:
         return MODE_STATE.read_text().strip()
     except Exception:
         return "ambient"
+
+
+def tts_is_speaking() -> bool:
+    """Return True if the arbiter is currently playing TTS audio."""
+    try:
+        state = json.loads(SPEAKING_NOW.read_text())
+        return state.get("speaking_pane") is not None
+    except Exception:
+        return False
 
 
 def inject_osascript(text: str) -> bool:
@@ -133,6 +146,10 @@ def main() -> None:
         mode = current_mode()
         if mode == "silent":
             log(f"silent mode — dropped: {transcript!r}")
+            continue
+
+        if tts_is_speaking():
+            log(f"TTS active — dropped (feedback guard): {transcript!r}")
             continue
 
         inject(transcript)
